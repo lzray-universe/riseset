@@ -4,13 +4,23 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import date
 import os
+from functools import lru_cache
 
 # Import from the patched module placed alongside this file or adjust PYTHONPATH.
 from lunar_calendar6_sunrise import DE441Reader, SunriseSunsetCalculator
 
-DE_BSP = os.environ.get("DE_BSP", "/path/to/de441.bsp")
-eph = DE441Reader(DE_BSP)
-calc = SunriseSunsetCalculator(eph)
+
+@lru_cache(maxsize=1)
+def _get_calculator() -> SunriseSunsetCalculator:
+    de_bsp = os.environ.get("DE_BSP")
+    if not de_bsp:
+        raise RuntimeError(
+            "环境变量 DE_BSP 未设置：请提供一个或多个 DE440/DE441 SPK 路径，"
+            "可使用操作系统路径分隔符连接，或指定包含 .bsp 文件的目录。"
+        )
+    eph = DE441Reader(de_bsp)
+    return SunriseSunsetCalculator(eph)
+
 
 app = FastAPI(title="Sunrise/Sunset DE440/DE441 API")
 
@@ -51,5 +61,6 @@ def sun(
         today = datetime.utcnow().date()
     else:
         today = day
+    calc = _get_calculator()
     res = calc.sunrise_sunset(today.year, today.month, today.day, lon, lat, elev, pressure, temp, dut1, xp, yp)
     return res

@@ -18,7 +18,7 @@ import math
 import os
 import numpy as np
 from dataclasses import dataclass
-from typing import Tuple, Dict, List, ClassVar
+from typing import Tuple, Dict, List, ClassVar, Sequence
 
 from astropy.time import Time, TimeDelta
 
@@ -56,11 +56,14 @@ UTC8_OFFSET = TimeDelta(8 * 3600, format='sec')
 class DE441Reader:
     """基于 spiceypy 读取 DE440/DE441 历表；封装常用组合段。"""
 
-    filepath: str
+    kernel_paths: Sequence[str] | str
     _loaded_paths: ClassVar[set[str]] = set()
 
     def __post_init__(self) -> None:
-        self.filepath = os.path.abspath(self.filepath)
+        paths = self._normalize_kernel_paths(self.kernel_paths)
+        if not paths:
+            raise ValueError("必须提供至少一个 SPK 历表文件。")
+        self.kernel_paths = tuple(paths)
         self._ensure_kernel_loaded()
         # 常用编号
         self.SSB = 0       # 太阳系质心
@@ -77,6 +80,38 @@ class DE441Reader:
             self.MOON: "MOON",
         }
 
+    @staticmethod
+    def _normalize_kernel_paths(value: Sequence[str] | str) -> List[str]:
+        if isinstance(value, str):
+            raw_items = [value]
+        else:
+            raw_items = list(value)
+
+        expanded: List[str] = []
+        for item in raw_items:
+            if not isinstance(item, str):
+                raise TypeError("历表路径必须是字符串。")
+            parts = [p for p in item.split(os.pathsep) if p]
+            if not parts:
+                continue
+            for part in parts:
+                path = os.path.expanduser(part)
+                if os.path.isdir(path):
+                    for entry in sorted(os.listdir(path)):
+                        if entry.lower().endswith('.bsp'):
+                            expanded.append(os.path.abspath(os.path.join(path, entry)))
+                else:
+                    expanded.append(os.path.abspath(path))
+
+        # 去重同时保持顺序
+        seen = set()
+        unique_paths: List[str] = []
+        for path in expanded:
+            if path not in seen:
+                unique_paths.append(path)
+                seen.add(path)
+        return unique_paths
+
     def _ensure_kernel_loaded(self) -> None:
         need_load = False
         try:
@@ -86,12 +121,16 @@ class DE441Reader:
         except Exception:
             need_load = True
 
-        if self.filepath not in self._loaded_paths:
+        missing = [p for p in self.kernel_paths if p not in self._loaded_paths]
+        if missing:
             need_load = True
 
         if need_load:
-            spice.furnsh(self.filepath)
-        self._loaded_paths.add(self.filepath)
+            for kernel in missing:
+                if not os.path.exists(kernel):
+                    raise FileNotFoundError(f"未找到历表文件: {kernel}")
+                spice.furnsh(kernel)
+                self._loaded_paths.add(kernel)
 
     def _to_name(self, code: int) -> str:
         try:
@@ -1347,7 +1386,7 @@ def _cli_sunrise_sunset(args):
     # The launcher passes [<thisfile> <de441.bsp>] before these flags
     import sys
     if len(sys.argv) < 2:
-        raise SystemExit('Usage: python lunar_calendar6_sunrise.py <de441.bsp> --sun --date YYYY-MM-DD --lat ... --lon ... [--elev ...]')
+        raise SystemExit('Usage: python lunar_calendar6_sunrise.py <de441.bsp' + os.pathsep + 'de441_part-2.bsp> --sun --date YYYY-MM-DD --lat ... --lon ... [--elev ...]')
     eph_path = sys.argv[1]
 
     eph = DE441Reader(eph_path)
