@@ -6,10 +6,78 @@ DATA_DIR="${ROOT_DIR}/data"
 EPHEMERIS_FILE="${DATA_DIR}/de442s.bsp"
 EPHEMERIS_URL="https://ssd.jpl.nasa.gov/ftp/eph/planets/bsp/de442s.bsp"
 
-if [[ -f "${ROOT_DIR}/requirements.txt" ]]; then
+install_dependencies() {
+  local requirements_file="${ROOT_DIR}/requirements.txt"
+  [[ -f "${requirements_file}" ]] || return 0
+
   echo "Installing Python dependencies from requirements.txt..."
-  pip install --upgrade -r "${ROOT_DIR}/requirements.txt"
-fi
+
+  local -A apt_package_map=(
+    [fastapi]="python3-fastapi"
+    [uvicorn]="python3-uvicorn"
+    [pydantic]="python3-pydantic"
+    [numpy]="python3-numpy"
+    [astropy]="python3-astropy"
+    [joblib]="python3-joblib"
+    [spiceypy]="python3-spiceypy"
+    [pyerfa]="python3-pyerfa"
+  )
+
+  local -a apt_packages=()
+  local -a apt_fallback_requirements=()
+  local -a pip_requirements=()
+  while IFS= read -r requirement || [[ -n "${requirement}" ]]; do
+    requirement="${requirement%%#*}"
+    requirement="${requirement//[$'\t\r\n ']}"
+    [[ -n "${requirement}" ]] || continue
+
+    local key="${requirement}"
+    key="${key%%[<>=!~]*}"         # strip version specifiers
+    key="${key%%[*}"               # strip extras
+    key="${key,,}"                 # normalize to lowercase
+
+    if [[ -n "${apt_package_map[${key}]:-}" ]]; then
+      apt_packages+=("${apt_package_map[${key}]}")
+      apt_fallback_requirements+=("${requirement}")
+    else
+      pip_requirements+=("${requirement}")
+    fi
+  done < "${requirements_file}"
+
+  if [[ ${#apt_packages[@]} -gt 0 ]] && command -v apt-get >/dev/null 2>&1; then
+    local -a unique_apt_packages
+    mapfile -t unique_apt_packages < <(printf '%s\n' "${apt_packages[@]}" | sort -u)
+    local apt_cmd=(apt-get)
+    if [[ ${EUID} -ne 0 ]]; then
+      if command -v sudo >/dev/null 2>&1; then
+        apt_cmd=(sudo apt-get)
+      else
+        echo "Warning: apt-get requires root privileges. Falling back to pip for all packages." >&2
+        pip_requirements+=("${apt_fallback_requirements[@]}")
+        unique_apt_packages=()
+      fi
+    fi
+
+    if [[ ${#unique_apt_packages[@]} -gt 0 ]]; then
+      echo "Using apt-get to install available system packages..."
+      if "${apt_cmd[@]}" update && "${apt_cmd[@]}" install -y "${unique_apt_packages[@]}"; then
+        :
+      else
+        echo "Warning: apt-get installation failed; falling back to pip for unmet requirements." >&2
+        pip_requirements+=("${apt_fallback_requirements[@]}")
+      fi
+    fi
+  else
+    pip_requirements+=("${apt_fallback_requirements[@]}")
+  fi
+
+  if [[ ${#pip_requirements[@]} -gt 0 ]]; then
+    echo "Installing remaining dependencies with pip..."
+    python3 -m pip install --upgrade "${pip_requirements[@]}"
+  fi
+}
+
+install_dependencies
 
 ensure_ephemeris() {
   mkdir -p "${DATA_DIR}"
