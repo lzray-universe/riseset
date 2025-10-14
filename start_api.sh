@@ -5,6 +5,26 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="${ROOT_DIR}/data"
 EPHEMERIS_FILE="${DATA_DIR}/de442s.bsp"
 EPHEMERIS_URL="https://ssd.jpl.nasa.gov/ftp/eph/planets/bsp/de442s.bsp"
+VENV_DIR="${ROOT_DIR}/.venv"
+VENV_BIN="${VENV_DIR}/bin"
+PYTHON_BIN="${VENV_BIN}/python"
+
+ensure_virtualenv() {
+  if [[ -x "${PYTHON_BIN}" ]]; then
+    return
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "Error: python3 is required but was not found in PATH." >&2
+    exit 1
+  fi
+
+  echo "Creating Python virtual environment at ${VENV_DIR}..."
+  python3 -m venv --system-site-packages "${VENV_DIR}"
+
+  echo "Upgrading pip and build tooling in the virtual environment..."
+  "${PYTHON_BIN}" -m pip install --upgrade pip setuptools wheel
+}
 
 install_dependencies() {
   local requirements_file="${ROOT_DIR}/requirements.txt"
@@ -72,11 +92,12 @@ install_dependencies() {
   fi
 
   if [[ ${#pip_requirements[@]} -gt 0 ]]; then
-    echo "Installing remaining dependencies with pip..."
-    python3 -m pip install --upgrade "${pip_requirements[@]}"
+    echo "Installing remaining dependencies with pip in the virtual environment..."
+    "${PYTHON_BIN}" -m pip install --upgrade "${pip_requirements[@]}"
   fi
 }
 
+ensure_virtualenv
 install_dependencies
 
 ensure_ephemeris() {
@@ -126,4 +147,7 @@ fi
 
 export PYTHONPATH="${ROOT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
-exec uvicorn sunrise_api:app --host 0.0.0.0 --port 7000 "$@"
+export VIRTUAL_ENV="${VENV_DIR}"
+export PATH="${VENV_BIN}:${PATH}"
+
+exec "${PYTHON_BIN}" -m uvicorn sunrise_api:app --host 0.0.0.0 --port 7000 "$@"
