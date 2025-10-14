@@ -18,7 +18,7 @@ import math
 import os
 import numpy as np
 from dataclasses import dataclass
-from typing import Tuple, Dict, List, ClassVar
+from typing import Tuple, Dict, List, ClassVar, Sequence
 
 from astropy.time import Time, TimeDelta
 
@@ -56,11 +56,14 @@ UTC8_OFFSET = TimeDelta(8 * 3600, format='sec')
 class DE441Reader:
     """基于 spiceypy 读取 DE440/DE441 历表；封装常用组合段。"""
 
-    filepath: str
+    kernel_paths: Sequence[str] | str
     _loaded_paths: ClassVar[set[str]] = set()
 
     def __post_init__(self) -> None:
-        self.filepath = os.path.abspath(self.filepath)
+        paths = self._normalize_kernel_paths(self.kernel_paths)
+        if not paths:
+            raise ValueError("必须提供至少一个 SPK 历表文件。")
+        self.kernel_paths = tuple(paths)
         self._ensure_kernel_loaded()
         # 常用编号
         self.SSB = 0       # 太阳系质心
@@ -77,6 +80,38 @@ class DE441Reader:
             self.MOON: "MOON",
         }
 
+    @staticmethod
+    def _normalize_kernel_paths(value: Sequence[str] | str) -> List[str]:
+        if isinstance(value, str):
+            raw_items = [value]
+        else:
+            raw_items = list(value)
+
+        expanded: List[str] = []
+        for item in raw_items:
+            if not isinstance(item, str):
+                raise TypeError("历表路径必须是字符串。")
+            parts = [p for p in item.split(os.pathsep) if p]
+            if not parts:
+                continue
+            for part in parts:
+                path = os.path.expanduser(part)
+                if os.path.isdir(path):
+                    for entry in sorted(os.listdir(path)):
+                        if entry.lower().endswith('.bsp'):
+                            expanded.append(os.path.abspath(os.path.join(path, entry)))
+                else:
+                    expanded.append(os.path.abspath(path))
+
+        # 去重同时保持顺序
+        seen = set()
+        unique_paths: List[str] = []
+        for path in expanded:
+            if path not in seen:
+                unique_paths.append(path)
+                seen.add(path)
+        return unique_paths
+
     def _ensure_kernel_loaded(self) -> None:
         need_load = False
         try:
@@ -86,12 +121,16 @@ class DE441Reader:
         except Exception:
             need_load = True
 
-        if self.filepath not in self._loaded_paths:
+        missing = [p for p in self.kernel_paths if p not in self._loaded_paths]
+        if missing:
             need_load = True
 
         if need_load:
-            spice.furnsh(self.filepath)
-        self._loaded_paths.add(self.filepath)
+            for kernel in missing:
+                if not os.path.exists(kernel):
+                    raise FileNotFoundError(f"未找到历表文件: {kernel}")
+                spice.furnsh(kernel)
+                self._loaded_paths.add(kernel)
 
     def _to_name(self, code: int) -> str:
         try:
@@ -1084,7 +1123,8 @@ class SunriseSunsetCalculator:
         n_app /= np.linalg.norm(n_app)
         return n_app * np.linalg.norm(r_topo_gcrs)
 
-    def _altitude_app_center(self, utc_dt, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec):
+    def _sun_altitude_components(self, utc_dt, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec):
+        """Return apparent center altitude, semidiameter, and horizon dip."""
         lon = math.radians(lon_deg); lat = math.radians(lat_deg)
 
         # ERFA matrices for this moment
@@ -1140,6 +1180,10 @@ class SunriseSunsetCalculator:
         # Horizon dip by elevation
         dip = _horizon_dip_rad(elev_m)
 
+        return h_app, sd, dip
+
+    def _altitude_app_center(self, utc_dt, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec):
+        h_app, sd, dip = self._sun_altitude_components(utc_dt, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec)
         # For limb touching visible horizon: h_app(center) + sd + dip = 0
         return h_app + sd + dip
 
@@ -1157,70 +1201,152 @@ class SunriseSunsetCalculator:
 
         local_midnight = datetime(year, month, day, 0, 0, 0, tzinfo=tz)
         day0 = local_midnight.astimezone(timezone.utc)
+        # Define altitude conditions for sunrise/sunset and twilights
+        twilight_angles = {
+            'civil': -6.0,
+            'nautical': -12.0,
+            'astronomical': -18.0,
+        }
+
+        def _limb_condition(h_app, sd, dip):
+            return h_app + sd + dip
+
+        event_specs = {
+            'sun': {
+                'func': _limb_condition,
+                'labels': ('sunrise', 'sunset'),
+            }
+        }
+        for name, angle in twilight_angles.items():
+            rad = math.radians(angle)
+
+            def _make_func(target_rad):
+                return lambda h_app, sd, dip, target=target_rad: h_app - target
+
+            event_specs[name] = {
+                'func': _make_func(rad),
+                'labels': (f'{name}_dawn', f'{name}_dusk'),
+            }
+
         # sample every 30 minutes to robustly bracket events (handles high latitudes better)
         samples = []
         for k in range(49):  # 0..24h by 0.5h
             t = day0 + timedelta(minutes=30*k)
-            f = self._altitude_app_center(t, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec)
-            samples.append((t, f))
+            h_app, sd, dip = self._sun_altitude_components(t, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec)
+            values = {key: spec['func'](h_app, sd, dip) for key, spec in event_specs.items()}
+            samples.append((t, values))
 
-        # Find sign-change intervals
-        brackets = []
-        for (t1, f1), (t2, f2) in zip(samples[:-1], samples[1:]):
-            if f1 == 0.0:
-                brackets.append((t1, t1))
-            elif f1 * f2 < 0.0:
-                brackets.append((t1, t2))
+        # Find sign-change intervals for each event
+        event_brackets = {key: [] for key in event_specs}
+        for (t1, vals1), (t2, vals2) in zip(samples[:-1], samples[1:]):
+            for key in event_specs:
+                f1 = vals1[key]
+                f2 = vals2[key]
+                if f1 == 0.0:
+                    event_brackets[key].append((t1, t1))
+                elif f1 * f2 < 0.0:
+                    event_brackets[key].append((t1, t2))
 
         # Refine by bisection to ~0.1 s
-        def refine(t1, t2):
+        def refine(t1, t2, func):
             from datetime import timedelta
+            if t1 == t2:
+                return t1
+            f1 = func(*self._sun_altitude_components(t1, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec))
+            f2 = func(*self._sun_altitude_components(t2, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec))
             for _ in range(80):
                 mid = t1 + (t2 - t1)/2
-                fm = self._altitude_app_center(mid, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec)
+                fm = func(*self._sun_altitude_components(mid, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec))
                 if abs(fm) < 1e-12 or (t2 - t1).total_seconds() < 0.1:
                     return mid
-                f1 = self._altitude_app_center(t1, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec)
                 if f1 * fm <= 0.0:
                     t2 = mid
+                    f2 = fm
                 else:
                     t1 = mid
+                    f1 = fm
             return t1 + (t2 - t1)/2
 
-        events = [refine(a,b) for (a,b) in brackets[:2]]
+        event_times = {}
+        for key, spec in event_specs.items():
+            func = spec['func']
+            brackets = event_brackets[key]
+            refined = [refine(a, b, func) for (a, b) in brackets[:2]]
+            event_times[key] = sorted(refined)
 
-        if not events:
-            # Determine always-up or always-down by checking all samples
-            above = all(f > 0 for _, f in samples)
-            below = all(f < 0 for _, f in samples)
+        sun_events = event_times.get('sun', [])
+        if not sun_events:
+            sun_values = [vals['sun'] for _, vals in samples]
+            above = all(f > 0 for f in sun_values)
+            below = all(f < 0 for f in sun_values)
             status = 'polar_day' if above else ('polar_night' if below else 'no_event')
             return {
                 'sunrise_utc': None,
                 'sunset_utc': None,
                 'sunrise_local': None,
                 'sunset_local': None,
+                'civil_dawn_utc': None,
+                'civil_dawn_local': None,
+                'civil_dusk_utc': None,
+                'civil_dusk_local': None,
+                'nautical_dawn_utc': None,
+                'nautical_dawn_local': None,
+                'nautical_dusk_utc': None,
+                'nautical_dusk_local': None,
+                'astronomical_dawn_utc': None,
+                'astronomical_dawn_local': None,
+                'astronomical_dusk_utc': None,
+                'astronomical_dusk_local': None,
                 'status': status,
                 'tz_offset_hours': tz_offset_hours,
             }
 
         # Sort chronologically
-        events.sort()
         out = {
             'sunrise_utc': None,
             'sunset_utc': None,
             'sunrise_local': None,
             'sunset_local': None,
+            'civil_dawn_utc': None,
+            'civil_dawn_local': None,
+            'civil_dusk_utc': None,
+            'civil_dusk_local': None,
+            'nautical_dawn_utc': None,
+            'nautical_dawn_local': None,
+            'nautical_dusk_utc': None,
+            'nautical_dusk_local': None,
+            'astronomical_dawn_utc': None,
+            'astronomical_dawn_local': None,
+            'astronomical_dusk_utc': None,
+            'astronomical_dusk_local': None,
             'status': 'ok',
             'tz_offset_hours': tz_offset_hours,
         }
-        if len(events) >= 1:
-            sunrise_utc = events[0]
-            out['sunrise_utc'] = _jd_to_iso_utc(_datetime_to_jd_utc(sunrise_utc))
-            out['sunrise_local'] = sunrise_utc.astimezone(tz).isoformat()
-        if len(events) >= 2:
-            sunset_utc = events[1]
-            out['sunset_utc'] = _jd_to_iso_utc(_datetime_to_jd_utc(sunset_utc))
-            out['sunset_local'] = sunset_utc.astimezone(tz).isoformat()
+
+        def _assign(label, dt_value):
+            if dt_value is None:
+                out[f'{label}_utc'] = None
+                out[f'{label}_local'] = None
+            else:
+                out[f'{label}_utc'] = _jd_to_iso_utc(_datetime_to_jd_utc(dt_value))
+                out[f'{label}_local'] = dt_value.astimezone(tz).isoformat()
+
+        sun_events.sort()
+        if len(sun_events) >= 1:
+            _assign('sunrise', sun_events[0])
+        if len(sun_events) >= 2:
+            _assign('sunset', sun_events[1])
+
+        for key, spec in event_specs.items():
+            if key == 'sun':
+                continue
+            labels = spec['labels']
+            times = event_times.get(key, [])
+            times.sort()
+            if len(labels) >= 1:
+                _assign(labels[0], times[0] if len(times) >= 1 else None)
+            if len(labels) >= 2:
+                _assign(labels[1], times[1] if len(times) >= 2 else None)
         return out
 
 
@@ -1260,7 +1386,7 @@ def _cli_sunrise_sunset(args):
     # The launcher passes [<thisfile> <de441.bsp>] before these flags
     import sys
     if len(sys.argv) < 2:
-        raise SystemExit('Usage: python lunar_calendar6_sunrise.py <de441.bsp> --sun --date YYYY-MM-DD --lat ... --lon ... [--elev ...]')
+        raise SystemExit('Usage: python lunar_calendar6_sunrise.py <de441.bsp' + os.pathsep + 'de441_part-2.bsp> --sun --date YYYY-MM-DD --lat ... --lon ... [--elev ...]')
     eph_path = sys.argv[1]
 
     eph = DE441Reader(eph_path)
