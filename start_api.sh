@@ -157,4 +157,4 @@ export PYTHONPATH="${ROOT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 export VIRTUAL_ENV="${VENV_DIR}"
 export PATH="${VENV_BIN}:${PATH}"
 
-exec "${PYTHON_BIN}" -m uvicorn sunrise_api:app --host 0.0.0.0 --port 6000 "$@"
+exec "${PYTHON_BIN}" -m uvicorn sunrise_api:app --host 0.0.0.0 --port 9000 "$@"
