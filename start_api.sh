@@ -3,8 +3,6 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="${ROOT_DIR}/data"
-EPHEMERIS_FILE="${DATA_DIR}/de442s.bsp"
-EPHEMERIS_URL="https://ssd.jpl.nasa.gov/ftp/eph/planets/bsp/de442s.bsp"
 VENV_DIR="${ROOT_DIR}/.venv"
 VENV_BIN="${VENV_DIR}/bin"
 PYTHON_BIN="${VENV_BIN}/python"
@@ -100,29 +98,38 @@ install_dependencies() {
 ensure_virtualenv
 install_dependencies
 
-ensure_ephemeris() {
-  mkdir -p "${DATA_DIR}"
-  if [[ ! -s "${EPHEMERIS_FILE}" ]]; then
-    echo "Downloading JPL DE442 ephemeris (this may take a while)..."
-    tmp_file="${EPHEMERIS_FILE}.part"
-    if command -v curl >/dev/null 2>&1; then
-      curl -fL --progress-bar "${EPHEMERIS_URL}" -o "${tmp_file}"
-    elif command -v wget >/dev/null 2>&1; then
-      wget -O "${tmp_file}" "${EPHEMERIS_URL}"
-    else
-      echo "Error: Neither curl nor wget is available to download ${EPHEMERIS_URL}" >&2
-      exit 1
-    fi
-    mv "${tmp_file}" "${EPHEMERIS_FILE}"
-  else
-    echo "Using cached ephemeris at ${EPHEMERIS_FILE}"
-  fi
+find_local_bsp_files() {
+  local -n _result=$1
+  local search_dir="${2:-${DATA_DIR}}"
+
+  _result=()
+  [[ -d "${search_dir}" ]] || return 0
+
+  while IFS= read -r -d '' file; do
+    _result+=("${file}")
+  done < <(find "${search_dir}" -maxdepth 1 -type f -name '*.bsp' -print0 | sort -z)
 }
 
 set_de_bsp_default() {
-  ensure_ephemeris
-  export DE_BSP="${EPHEMERIS_FILE}"
-  echo "DE_BSP 环境变量未设置，已自动指向 ${DE_BSP}"
+  mkdir -p "${DATA_DIR}"
+
+  local -a bsp_files
+  find_local_bsp_files bsp_files
+
+  if [[ ${#bsp_files[@]} -eq 0 ]]; then
+    echo "错误：在 ${DATA_DIR} 下未找到任何 .bsp 文件，请手动下载并设置 DE_BSP。" >&2
+    exit 1
+  fi
+
+  local joined
+  joined=$(IFS=:; printf '%s' "${bsp_files[*]}")
+  export DE_BSP="${joined}"
+
+  if [[ ${#bsp_files[@]} -eq 1 ]]; then
+    echo "DE_BSP 环境变量未设置，已自动指向 ${DE_BSP}"
+  else
+    echo "DE_BSP 环境变量未设置，检测到多个 BSP 文件并已全部加入：${DE_BSP}"
+  fi
 }
 
 validate_de_bsp() {
