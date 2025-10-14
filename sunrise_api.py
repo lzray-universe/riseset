@@ -16,8 +16,23 @@ app = FastAPI(title="Sunrise/Sunset DE440/DE441 API")
 
 class SunResponse(BaseModel):
     sunrise_utc: Optional[str]
+    sunrise_local: Optional[str]
     sunset_utc: Optional[str]
+    sunset_local: Optional[str]
+    civil_dawn_utc: Optional[str]
+    civil_dawn_local: Optional[str]
+    civil_dusk_utc: Optional[str]
+    civil_dusk_local: Optional[str]
+    nautical_dawn_utc: Optional[str]
+    nautical_dawn_local: Optional[str]
+    nautical_dusk_utc: Optional[str]
+    nautical_dusk_local: Optional[str]
+    astronomical_dawn_utc: Optional[str]
+    astronomical_dawn_local: Optional[str]
+    astronomical_dusk_utc: Optional[str]
+    astronomical_dusk_local: Optional[str]
     status: str
+    tz_offset_hours: float
 
 @app.get("/sun", response_model=SunResponse)
 def sun(
