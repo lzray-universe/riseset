@@ -1124,7 +1124,7 @@ class SunriseSunsetCalculator:
         return n_app * np.linalg.norm(r_topo_gcrs)
 
     def _sun_altitude_components(self, utc_dt, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec):
-        """Return apparent center altitude, semidiameter, and horizon dip."""
+        """Return apparent & true center altitudes, semidiameter, and horizon dip."""
         lon = math.radians(lon_deg); lat = math.radians(lat_deg)
 
         # ERFA matrices for this moment
@@ -1142,18 +1142,19 @@ class SunriseSunsetCalculator:
         r_sun_gcrs_au = self._sun_geocentric_apparent_gcrs(jd_utc)
 
         # Topocentric geometric LOS (GCRS)
-        r_topo_gcrs = r_sun_gcrs_au - r_obs_gcrs_au
+        r_topo_geom_gcrs = r_sun_gcrs_au - r_obs_gcrs_au
 
         # Diurnal velocity of observer in ITRS and rotate to GCRS
         omega = np.array([0.0, 0.0, OMEGA_EARTH])  # rad/s
         v_obs_itrs = np.cross(omega, r_obs_itrs)   # m/s
         v_obs_gcrs = rc2t.T @ v_obs_itrs           # m/s
 
-        # Apply diurnal aberration
-        r_topo_gcrs = self._apply_diurnal_aberration(r_topo_gcrs, v_obs_gcrs)
+        # Apply diurnal aberration for apparent direction
+        r_topo_app_gcrs = self._apply_diurnal_aberration(r_topo_geom_gcrs, v_obs_gcrs)
 
         # Transform topocentric LOS to ITRS then to local ENU to get altitude
-        r_topo_itrs = rc2t @ (r_topo_gcrs * AU_M)  # now meters; only direction matters
+        r_topo_geom_itrs = rc2t @ (r_topo_geom_gcrs * AU_M)
+        r_topo_app_itrs = rc2t @ (r_topo_app_gcrs * AU_M)
 
         # ECEF -> ENU frame at site
         sinl, cosl = math.sin(lat), math.cos(lat)
@@ -1162,28 +1163,31 @@ class SunriseSunsetCalculator:
         n_hat = np.array([-sinl*cosL, -sinl*sinL, cosl])
         u_hat = np.array([ cosl*cosL,  cosl*sinL, sinl])
 
-        r_unit = r_topo_itrs / np.linalg.norm(r_topo_itrs)
-        s_u = float(u_hat @ r_unit)
-        # True geometric altitude of center
-        h_true = math.asin(max(-1.0, min(1.0, s_u)))
+        r_unit_true = r_topo_geom_itrs / np.linalg.norm(r_topo_geom_itrs)
+        r_unit_app = r_topo_app_itrs / np.linalg.norm(r_topo_app_itrs)
+        s_u_true = float(u_hat @ r_unit_true)
+        s_u_app = float(u_hat @ r_unit_app)
+        # True geometric altitude of center (no refraction / semidiameter / dip)
+        h_true = math.asin(max(-1.0, min(1.0, s_u_true)))
+        h_app_no_ref = math.asin(max(-1.0, min(1.0, s_u_app)))
 
-        # Apparent altitude with refraction (iterative on apparent altitude)
-        h_app = h_true
+        # Apparent altitude with atmospheric refraction applied iteratively
+        h_app = h_app_no_ref
         for _ in range(2):
             R = _refraction_saemundsson(h_app, pressure_hpa, temperature_c)
-            h_app = h_true + R
+            h_app = h_app_no_ref + R
 
         # Semidiameter (from topocentric distance)
-        dist_m = np.linalg.norm(r_topo_gcrs) * AU_M
+        dist_m = np.linalg.norm(r_topo_geom_gcrs) * AU_M
         sd = math.asin(min(1.0, R_SUN_M / dist_m))
 
         # Horizon dip by elevation
         dip = _horizon_dip_rad(elev_m)
 
-        return h_app, sd, dip
+        return h_app, h_true, sd, dip
 
     def _altitude_app_center(self, utc_dt, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec):
-        h_app, sd, dip = self._sun_altitude_components(utc_dt, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec)
+        h_app, _h_true, sd, dip = self._sun_altitude_components(utc_dt, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec)
         # For limb touching visible horizon: h_app(center) + sd + dip = 0
         return h_app + sd + dip
 
@@ -1208,7 +1212,7 @@ class SunriseSunsetCalculator:
             'astronomical': -18.0,
         }
 
-        def _limb_condition(h_app, sd, dip):
+        def _limb_condition(h_app, h_true, sd, dip):
             return h_app + sd + dip
 
         event_specs = {
@@ -1221,7 +1225,7 @@ class SunriseSunsetCalculator:
             rad = math.radians(angle)
 
             def _make_func(target_rad):
-                return lambda h_app, sd, dip, target=target_rad: h_app - target
+                return lambda h_app, h_true, sd, dip, target=target_rad: h_true - target
 
             event_specs[name] = {
                 'func': _make_func(rad),
@@ -1232,8 +1236,8 @@ class SunriseSunsetCalculator:
         samples = []
         for k in range(49):  # 0..24h by 0.5h
             t = day0 + timedelta(minutes=30*k)
-            h_app, sd, dip = self._sun_altitude_components(t, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec)
-            values = {key: spec['func'](h_app, sd, dip) for key, spec in event_specs.items()}
+            h_app, h_true, sd, dip = self._sun_altitude_components(t, lon_deg, lat_deg, elev_m, pressure_hpa, temperature_c, dut1_sec, xp_arcsec, yp_arcsec)
+            values = {key: spec['func'](h_app, h_true, sd, dip) for key, spec in event_specs.items()}
             samples.append((t, values))
 
         # Find sign-change intervals for each event
