@@ -48,13 +48,13 @@ class _TimeScales:
     et: float
 
 
-def load_ephemeris(bsp_dir: str) -> List[str]:
-    """Load all SPK kernels from *bsp_dir* using :mod:`spiceypy`.
+def load_ephemeris(bsp_path: str) -> List[str]:
+    """Load SPK kernels from *bsp_path* using :mod:`spiceypy`.
 
     Parameters
     ----------
-    bsp_dir:
-        Directory containing one or more ``.bsp`` files.
+    bsp_path:
+        Directory containing one or more ``.bsp`` files or an explicit ``.bsp`` file.
 
     Returns
     -------
@@ -72,20 +72,29 @@ def load_ephemeris(bsp_dir: str) -> List[str]:
     if _LOADED_FILES is not None:
         return _LOADED_FILES
 
-    path = Path(bsp_dir).expanduser()
-    if not path.is_dir():
-        raise EphemerisError(f"Ephemeris directory not found: {path}")
+    path = Path(bsp_path).expanduser()
+    if not path.exists():
+        raise EphemerisError(f"Ephemeris path not found: {path}")
 
     with _LOAD_LOCK:
         if _LOADED_FILES is not None:
             return _LOADED_FILES
 
-        bsp_files = sorted(
-            file for file in path.iterdir() if file.is_file() and file.suffix.lower() == ".bsp"
-        )
+        if path.is_dir():
+            bsp_files = sorted(
+                file
+                for file in path.iterdir()
+                if file.is_file() and file.suffix.lower() == ".bsp"
+            )
+        elif path.is_file() and path.suffix.lower() == ".bsp":
+            bsp_files = [path]
+        else:
+            raise EphemerisError(
+                f"Ephemeris path must be a directory or .bsp file: {path}"
+            )
         if not bsp_files:
             raise EphemerisError(
-                f"No .bsp ephemeris files found in directory: {path}"
+                f"No .bsp ephemeris files found in path: {path}"
             )
 
         loaded: List[str] = []

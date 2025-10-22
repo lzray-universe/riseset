@@ -17,8 +17,8 @@ first boot.
 ## Prerequisites
 
 - Python 3.11+
-- JPL DE-series SPK kernel such as `de442.bsp` placed in a directory referenced
-  by the `DE_BSP` environment variable.
+- Network access on first run to download `de442.bsp`, or a locally cached
+  ephemeris directory referenced by the optional `DE_BSP` environment variable.
 
 ## Local development
 
@@ -31,13 +31,16 @@ first boot.
    pip install -r requirements.txt
    ```
 
-2. Download an ephemeris (once) and set the environment variable:
+2. (Optional) Download an ephemeris manually and point the app at it:
 
    ```bash
    mkdir -p data/spk
    curl -fsSL https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de442.bsp -o data/spk/de442.bsp
    export DE_BSP=$PWD/data/spk
    ```
+
+   If you skip this step the application downloads `de442.bsp` into
+   `~/.riseset/kernels` on first startup.
 
 3. Start the API locally:
 
@@ -60,22 +63,25 @@ Build and run the container locally:
 
 ```bash
 docker build -t riseset .
-docker run --rm -p 8000:8000 -e DE_BSP=/data/spk -v "$PWD/data/spk:/data/spk" riseset
+docker run --rm -p 8000:8000 riseset
 ```
 
-Set the `EPHEMERIS_URL` environment variable to enable automatic download on
-first boot if the directory is empty.
+Mounting a host directory and exporting `DE_BSP` remains supported when you want
+to reuse an existing kernel:
+
+```bash
+docker run --rm -p 8000:8000 -e DE_BSP=/data/spk -v "$PWD/data/spk:/data/spk" riseset
+```
 
 ## Render deployment
 
 The provided `render.yaml` defines a web service using the Docker image. Steps:
 
-1. Provision a persistent disk (e.g. 5 GB) mounted at `/data`.
-2. Set the environment variable `DE_BSP=/data/spk` (already included in
-   `render.yaml`). Optionally configure `EPHEMERIS_URL` to download the kernel
-   automatically.
-3. Deploy the service; Render will run `scripts/boot.sh`, verify the ephemeris
-   directory, and start Uvicorn on `$PORT`.
+1. Provision a persistent disk (e.g. 5 GB) mounted at `/data` to cache the
+   ephemeris across deployments (optional but recommended).
+2. Deploy the service; the boot script validates any provided `DE_BSP`
+   directory, falls back to the internal cache (`~/.riseset/kernels`), downloads
+   `de442.bsp` if needed, and then starts Uvicorn on `$PORT`.
 
 Render health checks should target `/health`, which reports whether the
 ephemeris files were successfully loaded.
