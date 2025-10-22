@@ -108,6 +108,23 @@ def health() -> HealthResponse:
     )
 
 
+@app.get("/", include_in_schema=False)
+def index() -> JSONResponse:
+    """Provide a helpful landing page for the service root."""
+
+    payload = {
+        "message": "Riseset sunrise/sunset API",
+        "description": APP_DESCRIPTION,
+        "endpoints": {
+            "docs": "/docs",
+            "openapi": "/openapi.json",
+            "health": "/health",
+            "sun": "/sun",
+        },
+    }
+    return JSONResponse(content=payload)
+
+
 @app.get(
     "/sun",
     response_model=SunResponse,

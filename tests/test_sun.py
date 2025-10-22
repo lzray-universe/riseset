@@ -211,3 +211,12 @@ def test_health_endpoint(api_client: TestClient) -> None:
     assert payload["ok"] is True
     assert payload["ephemeris_loaded"] is True
     assert payload["files"]
+
+
+def test_root_endpoint(api_client: TestClient) -> None:
+    response = api_client.get("/")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["message"].lower().startswith("riseset")
+    assert payload["endpoints"]["docs"] == "/docs"
+    assert payload["endpoints"]["sun"] == "/sun"
