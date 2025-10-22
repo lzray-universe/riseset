@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+import math
 from pathlib import Path
 from typing import Iterable
 
@@ -211,3 +212,35 @@ def test_health_endpoint(api_client: TestClient) -> None:
     assert payload["ok"] is True
     assert payload["ephemeris_loaded"] is True
     assert payload["files"]
+
+
+def test_official_threshold_dynamic_variation() -> None:
+    base = astro._official_twilight_threshold(dist_au=1.0, elev_m=0.0)
+    assert math.isfinite(base)
+    assert base < 0
+    assert math.isclose(base, -0.7916, rel_tol=1e-3)
+
+    high_altitude = astro._official_twilight_threshold(dist_au=1.0, elev_m=2000.0)
+    assert high_altitude < base
+
+    low_pressure = astro._official_twilight_threshold(
+        dist_au=1.0, elev_m=0.0, P_hPa=800.0
+    )
+    assert low_pressure > base
+
+
+def test_api_accepts_pressure_temperature(api_client: TestClient) -> None:
+    response = api_client.get(
+        "/sun",
+        params={
+            "lat": 39.9,
+            "lon": 116.4,
+            "date": "2025-10-21",
+            "elev_m": 43,
+            "pressure_hpa": 1000.0,
+            "temperature_c": 5.0,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] in {"ok", "polar_day", "polar_night"}
