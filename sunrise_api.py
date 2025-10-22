@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from datetime import UTC, datetime, timedelta, timezone
 from typing import List, Optional
@@ -16,6 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from core.astro import EphemerisError, compute_sun_times, load_ephemeris
+from core.ephemeris import EphemerisAcquisitionError, resolve_ephemeris_source
 from models import ErrorResponse, HealthResponse, SunQueryParams, SunResponse
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -27,13 +27,17 @@ APP_DESCRIPTION = (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # pragma: no cover - exercised in integration tests
-    de_bsp = os.environ.get("DE_BSP")
-    if not de_bsp:
-        raise RuntimeError("DE_BSP environment variable must be set")
-    LOGGER.info(json.dumps({"event": "startup", "de_bsp": de_bsp}))
+    try:
+        source_path = resolve_ephemeris_source()
+    except EphemerisAcquisitionError as exc:
+        LOGGER.error(json.dumps({"event": "ephemeris_acquire_failed", "error": str(exc)}))
+        raise
+    LOGGER.info(
+        json.dumps({"event": "startup", "ephemeris_source": str(source_path)})
+    )
     global EPHEMERIS_FILES
     try:
-        EPHEMERIS_FILES = load_ephemeris(de_bsp)
+        EPHEMERIS_FILES = load_ephemeris(str(source_path))
     except EphemerisError as exc:
         LOGGER.error(json.dumps({"event": "ephemeris_load_failed", "error": str(exc)}))
         raise
