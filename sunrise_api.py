@@ -70,7 +70,11 @@ def _format_local(dt: Optional[datetime], offset_hours: Optional[float]) -> Opti
 def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
     payload = ErrorResponse(code=code, error=message)
     LOGGER.error(json.dumps({"event": "error", "code": code, "message": message}))
-    return JSONResponse(status_code=status_code, content=payload.model_dump())
+    if hasattr(payload, "model_dump"):
+        content = payload.model_dump()
+    else:  # pragma: no cover - pydantic v1 fallback
+        content = payload.dict()
+    return JSONResponse(status_code=status_code, content=content)
 
 
 @app.exception_handler(RequestValidationError)
@@ -126,6 +130,8 @@ def sun_endpoint(params: SunQueryParams = Depends()) -> SunResponse:
             lon=params.lon,
             elev_m=params.elev_m,
             twilight=params.twilight.value,
+            pressure_hpa=params.pressure_hpa,
+            temperature_c=params.temperature_c,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

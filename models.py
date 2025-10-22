@@ -6,7 +6,16 @@ from datetime import date
 from enum import Enum
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+try:  # pragma: no cover - exercised indirectly in tests
+    from pydantic import BaseModel, ConfigDict, Field, field_validator
+    _PYDANTIC_V2 = True
+except ImportError:  # pragma: no cover - fallback for environments with pydantic v1
+    from pydantic import BaseModel, Field, validator  # type: ignore
+
+    _PYDANTIC_V2 = False
+
+    def field_validator(field_name: str, *args, **kwargs):  # type: ignore[override]
+        return validator(field_name, *args, **kwargs)
 
 
 class Twilight(str, Enum):
@@ -21,12 +30,28 @@ class Twilight(str, Enum):
 class SunQueryParams(BaseModel):
     """Validated query parameters for the ``/sun`` endpoint."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    if _PYDANTIC_V2:
+        model_config = ConfigDict(populate_by_name=True)  # type: ignore[assignment]
+    else:  # pragma: no cover - pydantic v1 fallback
+        class Config:
+            allow_population_by_field_name = True
 
     lat: float = Field(..., ge=-90.0, le=90.0, description="Latitude in degrees")
     lon: float = Field(..., ge=-180.0, le=180.0, description="Longitude in degrees")
     date_utc: date = Field(..., alias="date", description="UTC calendar date (YYYY-MM-DD)")
     elev_m: float = Field(0.0, ge=-500.0, description="Observer elevation in meters")
+    pressure_hpa: float = Field(
+        1013.25,
+        ge=300.0,
+        le=1100.0,
+        description="Surface atmospheric pressure in hectopascals",
+    )
+    temperature_c: float = Field(
+        10.0,
+        ge=-80.0,
+        le=60.0,
+        description="Surface air temperature in degrees Celsius",
+    )
     offset_hours: Optional[float] = Field(
         None,
         description="Optional fixed offset in hours applied to derive local times",

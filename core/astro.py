@@ -26,6 +26,10 @@ TWILIGHT_ANGLES: Dict[str, float] = {
     "astronomical": -18.0,
 }
 
+AU_KM = 149_597_870.700
+R_SUN_KM = 695_700.0
+R_EARTH_M = 6_371_008.8  # Mean Earth radius from WGS84 (meters).
+
 EARTH_EQUATORIAL_RADIUS_KM = 6378.137  # WGS84 equatorial radius in kilometers.
 EARTH_EQUATORIAL_RADIUS_M = EARTH_EQUATORIAL_RADIUS_KM * 1000.0
 EARTH_FLATTENING = 1.0 / 298.257223563  # WGS84 flattening.
@@ -144,14 +148,46 @@ def _site_vector(lat_rad: float, lon_rad: float, elev_m: float) -> np.ndarray:
     return vector
 
 
-def _horizon_dip_degrees(elev_m: float) -> float:
-    """Approximate depression of the horizon due to observer height."""
+def _solar_semidiameter_degrees(dist_au: float) -> float:
+    """Return the apparent solar semidiameter in degrees for the given distance."""
+
+    return math.degrees(math.asin(R_SUN_KM / (dist_au * AU_KM)))
+
+
+def _saemundsson_refraction_degrees(
+    h_app_deg: float, P_hPa: float = 1013.25, T_C: float = 10.0
+) -> float:
+    """Return atmospheric refraction in degrees using the Saemundsson (1986) model."""
+
+    ang_deg = h_app_deg + 10.3 / (h_app_deg + 5.11)
+    R_arcmin = (P_hPa / 1010.0) * (283.0 / (273.0 + T_C)) * (
+        1.02 / math.tan(math.radians(ang_deg))
+    )
+    return R_arcmin / 60.0
+
+
+def _geometric_dip_degrees(elev_m: float) -> float:
+    """Return the geometric depression of the horizon in degrees due to elevation."""
 
     if elev_m <= 0:
         return 0.0
-    # Small-angle approximation valid for h << R.
-    dip_rad = math.sqrt(2.0 * elev_m / EARTH_EQUATORIAL_RADIUS_M)
-    return math.degrees(dip_rad)
+    ratio = R_EARTH_M / (R_EARTH_M + elev_m)
+    ratio = min(max(ratio, -1.0), 1.0)
+    return math.degrees(math.acos(ratio))
+
+
+def _official_twilight_threshold(
+    dist_au: float,
+    elev_m: float,
+    P_hPa: float = 1013.25,
+    T_C: float = 10.0,
+) -> float:
+    """Return the dynamic altitude threshold for official sunrise/sunset."""
+
+    semidiameter = _solar_semidiameter_degrees(dist_au)
+    refraction = _saemundsson_refraction_degrees(-semidiameter, P_hPa, T_C)
+    dip = _geometric_dip_degrees(elev_m)
+    return -(semidiameter + refraction + dip)
 
 
 def _twilight_altitude_degrees(twilight: str, elev_m: float) -> float:
@@ -159,7 +195,15 @@ def _twilight_altitude_degrees(twilight: str, elev_m: float) -> float:
         base_altitude = TWILIGHT_ANGLES[twilight]
     except KeyError as exc:
         raise ValueError(f"Unsupported twilight selector: {twilight}") from exc
-    return base_altitude - _horizon_dip_degrees(elev_m)
+    return base_altitude - _geometric_dip_degrees(elev_m)
+
+
+def _sun_distance_au(dt: datetime) -> float:
+    """Return the Sun-Earth distance in astronomical units at *dt*."""
+
+    times = _datetime_to_timescales(dt)
+    sun_vector, _ = spice.spkpos("SUN", times.et, "J2000", "LT+S", "EARTH")
+    return float(np.linalg.norm(sun_vector)) / AU_KM
 
 
 def _sun_altitude_degrees(
@@ -219,6 +263,8 @@ def compute_sun_times(
     lon: float,
     elev_m: float,
     twilight: str,
+    pressure_hpa: float = 1013.25,
+    temperature_c: float = 10.0,
 ) -> Dict[str, object]:
     """Compute sunrise and sunset for the given UTC date and location.
 
@@ -232,6 +278,10 @@ def compute_sun_times(
         Observer elevation above mean sea level in meters.
     twilight:
         Twilight definition key.
+    pressure_hpa:
+        Local atmospheric pressure in hectopascals, used for refraction modelling.
+    temperature_c:
+        Local air temperature in Celsius, used for refraction modelling.
 
     Returns
     -------
@@ -244,13 +294,24 @@ def compute_sun_times(
 
     lat_rad = math.radians(lat)
     lon_rad = math.radians(lon)
-    threshold = _twilight_altitude_degrees(twilight, elev_m)
     site_vector = _site_vector(lat_rad, lon_rad, elev_m)
     site_up = site_vector / np.linalg.norm(site_vector)
 
     window_start = datetime.combine(date_utc, datetime.min.time(), tzinfo=UTC)
     window_end = window_start + timedelta(days=1)
     step = timedelta(minutes=5)
+
+    if twilight == "official":
+        reference_dt = window_start + timedelta(hours=12)
+        dist_au = _sun_distance_au(reference_dt)
+        threshold = _official_twilight_threshold(
+            dist_au=dist_au,
+            elev_m=elev_m,
+            P_hPa=pressure_hpa,
+            T_C=temperature_c,
+        )
+    else:
+        threshold = _twilight_altitude_degrees(twilight, elev_m)
 
     samples: List[float] = []
     times: List[datetime] = []
