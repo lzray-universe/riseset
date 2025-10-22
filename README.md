@@ -1,81 +1,110 @@
-# Sunrise & Sunset Web API
+# Riseset API
 
-This project packages a FastAPI service that exposes precise sunrise and sunset
-computations backed by the high-accuracy `lunar_calendar6_sunrise.py`
-implementation. The service provides both JSON APIs and a browser-friendly
-interface that allows you to submit multiple computation tasks in parallel.
+High-precision sunrise and sunset calculations backed by CSPICE ephemerides and
+served through FastAPI. The service loads JPL DE-series SPK kernels (e.g.
+`de442.bsp`) from a configurable directory, optionally downloading the kernel on
+first boot.
 
-## Requirements
+## Features
 
-* Python 3.10+
-* [FastAPI](https://fastapi.tiangolo.com/)
-* [Uvicorn](https://www.uvicorn.org/)
-* `pydantic`
-* Access to a DE440/DE441 ephemeris SPK file. Set the environment variable
-  `DE_BSP` to point to the file or a directory containing the `.bsp` kernels.
+- FastAPI service with `/health` and `/sun` endpoints.
+- Structured JSON logging for observability.
+- CSPICE-based computation supporting official, civil, nautical, and
+  astronomical twilight definitions with horizon dip correction.
+- Docker image ready for Render deployment with persistent disk for ephemerides.
+- Pytest suite generating a compact ephemeris kernel for offline testing.
 
-Install the Python dependencies (FastAPI, uvicorn, pydantic, etc.) with pip:
+## Prerequisites
+
+- Python 3.11+
+- JPL DE-series SPK kernel such as `de442.bsp` placed in a directory referenced
+  by the `DE_BSP` environment variable.
+
+## Local development
+
+1. Create a virtual environment and install dependencies:
+
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install --upgrade pip
+   pip install -r requirements.txt
+   ```
+
+2. Download an ephemeris (once) and set the environment variable:
+
+   ```bash
+   mkdir -p data/spk
+   curl -fsSL https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de442.bsp -o data/spk/de442.bsp
+   export DE_BSP=$PWD/data/spk
+   ```
+
+3. Start the API locally:
+
+   ```bash
+   uvicorn sunrise_api:app --reload --host 0.0.0.0 --port 8000
+   ```
+
+4. Query the service:
+
+   ```bash
+   curl "http://localhost:8000/sun?lat=35.6895&lon=139.6917&date=2025-10-21&elev_m=40&offset_hours=9&twilight=official"
+   ```
+
+   The response contains UTC and optional local times together with the
+   computation status and data source identifier.
+
+## Docker usage
+
+Build and run the container locally:
 
 ```bash
-pip install -r requirements.txt  # if you maintain a requirements file
-# or install packages manually:
-pip install fastapi uvicorn pydantic
+docker build -t riseset .
+docker run --rm -p 8000:8000 -e DE_BSP=/data/spk -v "$PWD/data/spk:/data/spk" riseset
 ```
 
-## Running the server
+Set the `EPHEMERIS_URL` environment variable to enable automatic download on
+first boot if the directory is empty.
 
-1. Download the required DE440/DE441 ephemeris kernels and set the environment
-   variable `DE_BSP` before starting the service. For example:
+## Render deployment
 
-   ```bash
-   export DE_BSP="/data/de441.bsp"
-   ```
+The provided `render.yaml` defines a web service using the Docker image. Steps:
 
-2. Start the API with uvicorn (the application automatically binds to port
-   `7000`):
+1. Provision a persistent disk (e.g. 5 GB) mounted at `/data`.
+2. Set the environment variable `DE_BSP=/data/spk` (already included in
+   `render.yaml`). Optionally configure `EPHEMERIS_URL` to download the kernel
+   automatically.
+3. Deploy the service; Render will run `scripts/boot.sh`, verify the ephemeris
+   directory, and start Uvicorn on `$PORT`.
 
-   ```bash
-   uvicorn sunrise_api:app --host 0.0.0.0 --port 7000
-   ```
+Render health checks should target `/health`, which reports whether the
+ephemeris files were successfully loaded.
 
-   Alternatively, you can run the module directly:
+## Testing
 
-   ```bash
-   python sunrise_api.py
-   ```
+The test suite synthesizes a compact SPK kernel (covering year 2025) using ERFA
+and CSPICE routines, ensuring offline execution without large ephemeris files.
+Run tests with:
 
-3. Navigate to [http://localhost:7000](http://localhost:7000) to open the web
-   UI. Use the “Add row” button to queue multiple computations and submit them
-   as a batch. Each computation runs concurrently on the server. You can also
-   call the JSON API endpoints directly:
-
-   * `GET /sun` — query parameters corresponding to the computation inputs.
-   * `POST /sun` — JSON body matching the computation inputs.
-   * `POST /sun/batch` — JSON body containing an array of requests for
-     concurrent evaluation.
-
-## Response format
-
-Both single and batch endpoints return a structure that includes sunrise,
-sunset, civil/nautical/astronomical twilight times (UTC and local), the
-computation status, and the time-zone offset used for local timestamps.
-
-Example `POST /sun` payload:
-
-```json
-{
-  "lat": 39.9042,
-  "lon": 116.4074,
-  "elev": 50,
-  "day": "2024-06-01",
-  "pressure": 1013.25,
-  "temp": 20,
-  "dut1": 0,
-  "xp": 0,
-  "yp": 0,
-  "tz_offset_hours": 8
-}
+```bash
+pytest -q
 ```
 
-For more details on the underlying algorithm refer to
-`lunar_calendar6_sunrise.py`.
+Tests cover:
+
+- Known sunrise/sunset bounds for representative locations.
+- Polar day/night edge cases.
+- Validation error handling.
+
+## Project layout
+
+```
+riseset/
+├─ sunrise_api.py         # FastAPI application
+├─ core/astro.py          # Ephemeris loading and sun-time calculations
+├─ models.py              # Pydantic request/response models
+├─ scripts/boot.sh        # Render boot script (BSP check + Uvicorn)
+├─ tests/test_sun.py      # Pytest suite
+├─ Dockerfile             # Container definition
+└─ render.yaml            # Render deployment descriptor
+```
