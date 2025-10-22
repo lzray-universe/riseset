@@ -50,28 +50,75 @@ def _download_file(url: str, destination: Path) -> None:
         raise EphemerisAcquisitionError(f"Failed to download ephemeris from {url}: {exc}") from exc
 
 
-def resolve_ephemeris_source() -> Path:
-    """Return a path to a usable ephemeris kernel, downloading it if necessary."""
+def _ensure_ephemeris(path: Path) -> Path:
+    """Ensure *path* references an existing BSP file or directory containing one."""
 
-    override = os.environ.get("DE_BSP")
-    if override:
-        return Path(override).expanduser()
+    if path.exists():
+        if path.is_file():
+            if path.suffix.lower() != ".bsp":
+                raise EphemerisAcquisitionError(
+                    f"Ephemeris file must have .bsp extension: {path}"
+                )
+            return path
+        if path.is_dir():
+            existing = sorted(path.glob("*.bsp"))
+            if existing:
+                return path
+            destination = path / DEFAULT_EPHEMERIS_FILENAME
+            LOGGER.info(
+                json.dumps(
+                    {
+                        "event": "ephemeris_downloading",
+                        "url": DEFAULT_EPHEMERIS_URL,
+                        "destination": str(destination),
+                    }
+                )
+            )
+            _download_file(DEFAULT_EPHEMERIS_URL, destination)
+            return path
+        raise EphemerisAcquisitionError(
+            f"Ephemeris path is not a file or directory: {path}"
+        )
 
-    cache_root = Path(
-        os.environ.get("DE_BSP_CACHE_DIR", str(DEFAULT_CACHE_DIR))
-    ).expanduser()
-    ephemeris_path = cache_root / DEFAULT_EPHEMERIS_FILENAME
-    if not ephemeris_path.exists():
+    if path.suffix.lower() == ".bsp":
+        path.parent.mkdir(parents=True, exist_ok=True)
         LOGGER.info(
             json.dumps(
                 {
                     "event": "ephemeris_downloading",
                     "url": DEFAULT_EPHEMERIS_URL,
-                    "destination": str(ephemeris_path),
+                    "destination": str(path),
                 }
             )
         )
-        _download_file(DEFAULT_EPHEMERIS_URL, ephemeris_path)
+        _download_file(DEFAULT_EPHEMERIS_URL, path)
+        return path
 
-    return ephemeris_path
+    path.mkdir(parents=True, exist_ok=True)
+    destination = path / DEFAULT_EPHEMERIS_FILENAME
+    LOGGER.info(
+        json.dumps(
+            {
+                "event": "ephemeris_downloading",
+                "url": DEFAULT_EPHEMERIS_URL,
+                "destination": str(destination),
+            }
+        )
+    )
+    _download_file(DEFAULT_EPHEMERIS_URL, destination)
+    return path
+
+
+def resolve_ephemeris_source() -> Path:
+    """Return a path to a usable ephemeris kernel, downloading it if necessary."""
+
+    override = os.environ.get("DE_BSP")
+    if override:
+        return _ensure_ephemeris(Path(override).expanduser())
+
+    cache_root = Path(
+        os.environ.get("DE_BSP_CACHE_DIR", str(DEFAULT_CACHE_DIR))
+    ).expanduser()
+    ephemeris_path = cache_root / DEFAULT_EPHEMERIS_FILENAME
+    return _ensure_ephemeris(ephemeris_path)
 
