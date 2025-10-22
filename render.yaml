@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: riseset
+    env: docker
+    dockerfilePath: Dockerfile
+    healthCheckPath: /health
+    disk:
+      name: ephemeris
+      mountPath: /data
+      sizeGB: 5
+    envVars:
+      - key: DE_BSP
+        value: /data/spk
+      - key: EPHEMERIS_URL
+        value: ""
+        previewValue: ""
+        sync: false
